@@ -1,377 +1,229 @@
-# reviewography workflow
+# Workflow
 
-This document describes the intended workflow for `reviewography`.
+This document describes how reviewography is used during a review session.
 
-reviewography is designed around one core operation:
+For the underlying data model, see [Model](model.md).
 
-```text
-review a change once,
-using prior review memory,
-then record the new review result.
+For command details, see [Command index](command.md).
+
+For configuration, see [Configuration](configuration.md).
+
+## Core flow
+
+```mermaid
+flowchart TD
+  Init[revg init]
+  Start[revg review start --base main]
+  Change[Make or update implementation changes]
+  Run[revg review run]
+  Show[revg review show --unresolved]
+  Resolve[revg review resolve]
+  Full[revg review run --scope full]
+  Fold[revg review fold]
+  Apply[revg criteria apply]
+  End[revg review end]
+
+  Init --> Start --> Change --> Run --> Show
+  Show --> Change
+  Show --> Resolve
+  Resolve --> Change
+  Resolve --> Full
+  Full --> Fold --> Apply --> End
 ```
 
-It does not run an implementation-review-fix loop.
+The implementation and review loop happens outside reviewography.
 
-## Core workflow
+reviewography records and manages review findings, but it does not fix code.
 
-The basic flow is:
-
-```text
-1. Start from a current change
-2. Run reviewography
-3. Load relevant prior review records
-4. Review the current change
-5. Record new findings
-6. Generate structured output
-7. Optionally generate temporary human-readable views
-```
-
-In command form:
+## 1. Initialize the repository
 
 ```bash
-reviewography review --base main --head HEAD
+revg init
 ```
 
-or:
+This creates the local reviewography structure and a project-local config file.
+
+The config file is normally:
+
+```text
+reviewography.config.kdl
+```
+
+## 2. Start a review session
 
 ```bash
-revg review --base main --head HEAD
+revg review start --base main
 ```
 
-## Step 1: Start from a change
+`--base` is required.
 
-A change is usually identified by a Git base and head.
+The session is worktree-local. When Git worktrees are used, each worktree should have its own active session file.
 
-Examples:
+The session stores the base revision and a review cursor. See [Model](model.md) for the cursor model.
+
+## 3. Make changes outside reviewography
+
+Implementation may be done by a human or by an AI coding agent.
+
+reviewography does not own that work.
+
+## 4. Run an incremental review
 
 ```bash
-reviewography review --base main --head HEAD
-reviewography review --base origin/main --head feature/review-memory
-reviewography review --base v0.1.0 --head HEAD
+revg review run
 ```
 
-reviewography inspects the change and builds a local review context.
+This is equivalent to:
 
-The context may include:
+```bash
+revg review run --scope incremental
+```
 
-* changed files
-* changed modules
-* diff summary
-* existing review records
-* relevant review patterns
-* optional external review input
-* optional test evidence input
+An incremental review focuses on changes since the previous review run while still using the whole-session context, unresolved findings, and relevant criteria.
 
-## Step 2: Load relevant prior review records
+The command invokes one configured review agent.
 
-Before reviewing the current change, reviewography searches existing review memory.
+If the agent output is not valid according to the expected schema, reviewography asks the agent to regenerate the output up to `max_attempts`.
 
-It looks for review patterns relevant to the current change.
+## 5. Inspect unresolved findings
 
-Matching may use:
+```bash
+revg review show --unresolved
+```
 
-* changed file paths
-* module names
-* command names
-* previous finding categories
-* project-specific review policies
-* explicit tags
-* issue or ADR text when provided
+Findings are concrete review comments from review runs.
 
-Example matched patterns:
+They are not reusable criteria until they are folded into a proposal and applied.
+
+## 6. Resolve findings
+
+After external fixes or decisions, resolve findings explicitly.
+
+```bash
+revg review resolve <review-id> --as fixed
+```
+
+Other resolution states include:
 
 ```text
-- Hidden command visibility should be tested through user-facing help output
-- Output format changes should preserve structured result semantics
-- Before v0, conceptual consistency may take precedence over backward compatibility
-```
-
-These patterns are used as review context.
-
-They are not automatically treated as findings.
-
-## Step 3: Review the current change
-
-reviewography performs one review pass against the current change.
-
-The review should consider:
-
-* the current diff
-* relevant prior review patterns
-* project review policies
-* supplied issue or ADR context
-* optional test evidence
-* optional external review comments
-
-The result is a set of concrete findings.
-
-A finding should include:
-
-* category
-* severity
-* target
-* claim
-* evidence
-* recommended action
-* decision state
-
-Example categories:
-
-```text
-implementation-defect
-test-gap
-spec-doc-mismatch
-design-inconsistency
-scope-creep
-risk
-redundancy
-ai-readability
-review-policy
-```
-
-## Step 4: Record findings
-
-New findings are recorded as structured data.
-
-The canonical record is JSON or another machine-readable structured format.
-
-Example:
-
-```json
-{
-  "artifact_type": "review_finding",
-  "schema_version": "0",
-  "id": "finding-20260622-001",
-  "category": "test-gap",
-  "severity": "medium",
-  "target": {
-    "kind": "file",
-    "path": "cmd/root_test.go"
-  },
-  "claim": "The new output format flag is not tested together with command-level flags.",
-  "evidence": [
-    {
-      "kind": "diff",
-      "path": "cmd/root.go",
-      "note": "The output format flag is parsed globally."
-    },
-    {
-      "kind": "file",
-      "path": "cmd/root_test.go",
-      "note": "Tests cover the flag alone but not interaction with command-level flags."
-    }
-  ],
-  "recommended_action": "Add an integration test covering global output flags together with command-specific flags.",
-  "decision": "proposed"
-}
-```
-
-## Step 5: Generate output
-
-reviewography writes structured records first.
-
-Example output layout:
-
-```text
-.reviewography/
-  runs/
-    20260622-001/
-      review-run.json
-      relevant-patterns.json
-      findings.json
-      view.md
-```
-
-The structured files are canonical.
-
-The Markdown file is a temporary view.
-
-## Temporary human-readable view
-
-A human-readable view may be generated for convenience.
-
-Example:
-
-```md
-# Reviewography Review
-
-## Change
-- base: main
-- head: HEAD
-
-## Relevant prior patterns
-1. Hidden command visibility should be tested through user-facing help output
-2. Output format changes should preserve structured result semantics
-
-## Findings
-### finding-20260622-001
-- category: test-gap
-- severity: medium
-- target: cmd/root_test.go
-- claim: The new output format flag is not tested together with command-level flags.
-- recommended action: Add an integration test covering global output flags together with command-specific flags.
-
-## No finding
-No implementation defect was detected in the reviewed diff.
-
-## Notes
-This Markdown file is a generated view. The structured review records are canonical.
-```
-
-The Markdown view should not be edited as the source of truth.
-
-If a human wants to change the result, they should update the structured decision record through reviewography commands.
-
-## Decision workflow
-
-After reviewography records findings, a human or external workflow may decide them.
-
-Decision states:
-
-```text
-proposed
-accepted
 rejected
 deferred
-needs-human-decision
 accepted-negative
 superseded
+duplicate
 ```
 
-Example:
+`accepted-negative` records that a rejected concern should itself influence future reviews.
+
+## 7. Repeat as needed
+
+The normal loop is:
+
+```mermaid
+flowchart LR
+  Change[Change implementation]
+  Review[revg review run]
+  Findings[Inspect findings]
+  Resolve[Resolve findings]
+
+  Change --> Review --> Findings --> Resolve --> Change
+```
+
+The loop is driven by a human, skill, script, or another workflow tool.
+
+reviewography provides the review memory and structured records.
+
+## 8. Run a full review
+
+Before human review, PR creation, or session end, run:
 
 ```bash
-reviewography decide finding-20260622-001 --decision accepted
+revg review run --scope full
 ```
 
-or:
+A full review examines the whole change from the session base to the current head.
+
+There is no special final review scope. A full review may still produce findings.
+
+## 9. Fold findings into criteria proposals
 
 ```bash
-reviewography decide finding-20260622-002 \
-  --decision accepted-negative \
-  --reason "Before v0, backward compatibility should not block simplification."
+revg review fold
 ```
 
-## Generalization workflow
+`fold` creates criteria update proposals from the session findings.
 
-A concrete finding may be generalized into a reusable review pattern.
+It does not update criteria directly.
 
-Example:
+## 10. Apply selected criteria proposals
+
+Apply a proposal to repository-level criteria:
 
 ```bash
-reviewography generalize finding-20260622-001
+revg criteria apply --local <proposal-id>
 ```
 
-Concrete finding:
-
-```text
-cmd/tools/run is hidden, but help output does not have a direct test.
-```
-
-Generalized pattern:
-
-```text
-Hidden command visibility should be tested through user-facing help output.
-```
-
-The generalized pattern can be used in future reviews.
-
-## Reuse workflow
-
-On future changes, reviewography loads relevant patterns before reviewing.
-
-Example:
+Apply a proposal to user-level criteria:
 
 ```bash
-reviewography review --base main --head HEAD
+revg criteria apply --global <proposal-id>
 ```
 
-During review, it may detect that a prior pattern is relevant:
+Repository-level criteria should be preferred when review behavior must be shared or reproducible.
 
-```text
-Relevant prior pattern:
-- Hidden command visibility should be tested through user-facing help output
+User-level criteria are environment-dependent and may not behave well with devcontainers or CI.
 
-Current change:
-- Adds or modifies hidden CLI command behavior
+## 11. End the review session
 
-Review consequence:
-- Check whether user-facing help output behavior is tested.
+```bash
+revg review end
 ```
 
-If the current change satisfies the pattern, no finding is needed.
+Ending the session clears the active session pointer.
 
-If it violates the pattern, a new finding is recorded.
+It should not delete canonical findings, run records, or criteria proposals.
 
-## Handling no findings
+If unresolved findings remain, the command should warn.
 
-A review run may produce no findings.
+## Multi-agent review
 
-That is still useful.
+reviewography does not orchestrate multi-agent review.
 
-The run should record:
+One config means one review agent.
 
-* the change reviewed
-* relevant prior patterns considered
-* reviewer metadata
-* conclusion that no finding was produced
+If multi-agent review is needed, run separate processes with separate config files:
 
-Example:
-
-```json
-{
-  "artifact_type": "review_run",
-  "schema_version": "0",
-  "id": "run-20260622-001",
-  "base": "main",
-  "head": "HEAD",
-  "relevant_patterns": [
-    "pattern-hidden-command-help-visibility"
-  ],
-  "findings": [],
-  "conclusion": "no-findings"
-}
+```bash
+revg review run -c reviewography.codex.kdl
+revg review run -c reviewography.claude.kdl
 ```
 
-A no-finding run is not proof that the change is correct.
-It is only a record of one review pass.
+reviewography does not merge, deduplicate, or reconcile those findings automatically.
 
-## Out of scope
+## GitHub PR review comments
 
-The following are outside this workflow:
+Manual human review is expected to happen through GitHub PR comments or reviews.
 
-* automatically asking an implementation agent to fix findings
-* repeatedly running a reviewer until no findings remain
-* deciding whether to create a PR
-* merging changes
-* managing GitHub Issues
-* creating ADRs
-* performing full repository audits
-* extracting test evidence from test code
+Importing PR comments into reviewography is outside the current workflow.
 
-Those may be handled by other tools or skills.
+That capability should be designed together with a future GitHub Action that can translate PR comments into structured reviewography findings.
 
-reviewography's responsibility is limited to:
-
-```text
-review memory in
-review of current change
-review memory out
-```
-
-## Recommended integration
+## Larger development flow
 
 A larger AI-assisted development workflow may use reviewography like this:
 
-```text
-1. Discuss design in ChatGPT
-2. Record conclusion and ADR plan in an Issue
-3. Implement with an AI coding agent
-4. Run reviewography once against the change
-5. Use reviewography findings in a separate implementation-review loop if needed
-6. Generate or update human-readable review views
-7. Perform human review
-8. Merge
+```mermaid
+flowchart TD
+  Discuss[Discuss design]
+  Issue[Record conclusion and ADR plan]
+  Implement[Implement with AI coding agent]
+  Revg[Run reviewography]
+  Fix[Fix or decide findings outside reviewography]
+  Human[Human PR review]
+  Merge[Merge]
+
+  Discuss --> Issue --> Implement --> Revg --> Fix --> Revg
+  Revg --> Human --> Merge
 ```
 
-reviewography participates in the review step, but does not own the entire workflow.
+reviewography participates in the review step, but it does not own the entire development workflow.
